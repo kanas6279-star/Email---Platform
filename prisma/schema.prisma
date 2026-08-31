@@ -1,0 +1,105 @@
+// Prisma schema for the email platform.
+// Run `npx prisma db push` (dev) or `npx prisma migrate dev` (with migration
+// history) against a Postgres database to create these tables.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Folder {
+  INBOX
+  SENT
+  DRAFTS
+  TRASH
+  SPAM
+  ARCHIVE
+}
+
+model User {
+  id              String    @id @default(uuid())
+  email           String    @unique // full address, e.g. alice@mydomain.com
+  username        String    @unique // local part only, e.g. alice
+  displayName     String
+  passwordHash    String
+  isVerified      Boolean   @default(false)
+  verifyToken     String?
+  resetToken      String?
+  resetTokenExp   DateTime?
+  twoFactorSecret String?
+  twoFactorOn     Boolean   @default(false)
+  createdAt       DateTime  @default(now())
+
+  messages Message[]
+  sessions Session[]
+
+  @@index([username])
+}
+
+model Session {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+  userAgent String?
+
+  @@index([userId])
+}
+
+// Each row is one user's copy of a message sitting in one of their folders.
+// A message sent between two platform users produces two Message rows (one
+// in the sender's SENT folder, one in the recipient's INBOX) that share the
+// same threadId so replies thread correctly.
+model Message {
+  id           String   @id @default(uuid())
+  ownerId      String
+  owner        User     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  folder       Folder
+  isRead       Boolean  @default(false)
+  isStarred    Boolean  @default(false)
+  isDraft      Boolean  @default(false)
+
+  fromAddress  String
+  fromName     String?
+  toAddresses  String[]
+  ccAddresses  String[]
+  bccAddresses String[]
+
+  subject      String
+  bodyText     String
+  bodyHtml     String?
+
+  threadId     String
+  inReplyToId  String?  // id of the Message (in the same thread) this replies to
+  externalId   String?  // Message-ID header, used to correlate/dedupe inbound mail
+
+  spamScore    Int      @default(0)
+  spamReasons  String[]
+
+  sentAt       DateTime @default(now())
+  createdAt    DateTime @default(now())
+
+  attachments Attachment[]
+
+  @@index([ownerId, folder, sentAt])
+  @@index([threadId])
+  @@index([ownerId, subject])
+}
+
+model Attachment {
+  id         String   @id @default(uuid())
+  messageId  String
+  message    Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  filename   String
+  mimeType   String
+  sizeBytes  Int
+  storageKey String   // local path or S3 object key
+  createdAt  DateTime @default(now())
+
+  @@index([messageId])
+}
