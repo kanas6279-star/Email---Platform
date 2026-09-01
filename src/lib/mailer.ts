@@ -1,17 +1,10 @@
-import * as postmark from "postmark";
+import sgMail from "@sendgrid/mail";
 
 const MAIL_DOMAIN = process.env.MAIL_DOMAIN ?? "mydomain.com";
+const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
 
-let client: postmark.ServerClient | null = null;
-function getClient() {
-  if (!client) {
-    const token = process.env.POSTMARK_SERVER_TOKEN;
-    if (!token) {
-      throw new Error("POSTMARK_SERVER_TOKEN is not set");
-    }
-    client = new postmark.ServerClient(token);
-  }
-  return client;
+if (SENDGRID_API_KEY) {
+  sgMail.setApiKey(SENDGRID_API_KEY);
 }
 
 export function isInternalAddress(address: string) {
@@ -35,10 +28,15 @@ interface OutboundMail {
   inReplyToExternalId?: string;
 }
 
-// Sends mail to addresses outside our own domain via Postmark. Addresses on
+// Sends mail to addresses outside our own domain via SendGrid. Addresses on
 // our own domain never touch this — they're written straight into the
 // recipient's mailbox by the API route, since no internet hop is needed.
 export async function sendExternalMail(mail: OutboundMail) {
+  if (!SENDGRID_API_KEY) {
+    console.warn("SENDGRID_API_KEY not set - email not sent to external providers");
+    return null;
+  }
+
   const externalTo = mail.to.filter((a) => !isInternalAddress(a));
   const externalCc = (mail.cc ?? []).filter((a) => !isInternalAddress(a));
   const externalBcc = (mail.bcc ?? []).filter((a) => !isInternalAddress(a));
@@ -47,31 +45,33 @@ export async function sendExternalMail(mail: OutboundMail) {
     return null; // everyone was internal, nothing to send over the wire
   }
 
-  const result = await getClient().sendEmail({
-    From: mail.fromName ? `${mail.fromName} <${mail.from}>` : mail.from,
-    To: externalTo.join(", "),
-    Cc: externalCc.length ? externalCc.join(", ") : undefined,
-    Bcc: externalBcc.length ? externalBcc.join(", ") : undefined,
-    Subject: mail.subject,
-    TextBody: mail.bodyText,
-    HtmlBody: mail.bodyHtml,
-    MessageStream: "outbound",
-    Headers: mail.inReplyToExternalId
-      ? [{ Name: "In-Reply-To", Value: mail.inReplyToExternalId }]
-      : undefined,
-    Attachments: mail.attachments?.map((a) => ({
-      Name: a.filename,
-      Content: a.contentBase64,
-      ContentType: a.mimeType,
-      ContentID: "",
-    })),
-  });
+  try {
+    const msg = {
+      to: externalTo,
+      cc: externalCc.length ? externalCc : undefined,
+      bcc: externalBcc.length ? externalBcc : undefined,
+      from: mail.fromName ? { email: mail.from, name: mail.fromName } : mail.from,
+      subject: mail.subject,
+      text: mail.bodyText,
+      html: mail.bodyHtml,
+      replyToList: mail.inReplyToExternalId ? [{ email: mail.from }] : undefined,
+      attachments: mail.attachments?.map((a) => ({
+        filename: a.filename,
+        content: a.contentBase64,
+        type: a.mimeType,
+      })),
+    };
 
-  return result;
+    const result = await sgMail.send(msg);
+    return result;
+  } catch (error) {
+    console.error("SendGrid error:", error);
+    throw error;
+  }
 }
 
 // Very small heuristic spam filter for v1. This is intentionally simple —
-// swap in a real provider (Postmark's built-in filtering, rspamd, SpamAssassin,
+// swap in a real provider (SendGrid's built-in filtering, rspamd, SpamAssassin,
 // or a managed API) before relying on this in production.
 const SPAM_KEYWORDS = [
   "viagra",
